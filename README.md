@@ -98,12 +98,11 @@ The workflow is then separated in four parts, each using different scripts.
 
 # A. Determining and quantifying sequence pleiotropy
 
-Code used: ```src/Rscripts/scores.Rmd```. \
+```src/Rscripts/scores.Rmd```. \
 The script was executed in RStudio, on a local machine. 
 
 # B. Measuring sequence conservation
 
-Code used: 
 ```bash
 #Compute the mean conservation scores for each cis-regulatory region
 sbatch src/slurmjobs/alignment_pipeline/phastcons_v2.sh
@@ -116,7 +115,6 @@ The rest of the analysis was done with ```src/Rscripts/scores.Rmd``` on a local 
 
 # C. Measuring relative evolutionary rates for each sequence
 
-Code used: 
 ```bash
 #Extract the 34-species alignment from the 240-species Zoonomia alignment
 #Optional if you don't need to extract a subset of species in your analysis
@@ -144,7 +142,6 @@ The rest of the analysis was done with ```src/Rscripts/rerconverge.Rmd``` on a l
 
 # D. Checking sequence orthology
 
-Code used: 
 ```bash
 #Get the best summit from MACS2-predicted summits of each cluster
 python3 src/python_scripts/best_summit_per_cre.py --cres --summit --out --strategy
