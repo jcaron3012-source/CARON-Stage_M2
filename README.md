@@ -75,6 +75,46 @@ The codes are formatted to be used with SLURM in the CBPsmn cluster of the ENS d
 
 ------------
 
+## Package dependencies
+
+### Software
+- [HAL tools](https://github.com/ComparativeGenomicsToolkit/hal) (for HAL file manipulation)
+- [MAF tools](https://github.com/ComparativeGenomicsToolkit/cactus) (for MAF conversion)
+- [PHAST](http://compgen.cshl.edu/phast/) (for PhastCons/PhyloP)
+- [RERconverge](https://github.com/msu-hptl/rerconverge) (for relative rate analysis)
+- [HALPER](https://github.com/glennhickling/HALPER) (for orthology validation)
+- [BEDTools](https://bedtools.readthedocs.io/) (for BED file processing)
+- [UCSC LiftOver](https://genome.ucsc.edu/util.html) (for coordinate lifting)
+
+### Python/R Packages
+- Python: `pandas`, `numpy`, `biopython`
+- R : `dplyr`, `ggplot2`, `tidyr`, `textshape`, `patchwork`, `emmeans`, `UpSetR`, `ggbeeswarm`, `GenomeInfoDb`, `cowplot`, `gtools`, `wesanderson`, `ggtree`, `ggmsa`, `treeio`, `aplot`, `Biostrings`, `RERconverge`, `data.table`, `ComplexUpset`, `enrichplot`, `clusterProfiler`, `ggrepel`, `VennDiagram`, `scales`
+
+**Note:** All scripts are designed for execution on a **SLURM-managed HPC cluster** (e.g., CBPsmn at ENS de Lyon).
+
+## Installation
+
+1. **Clone the repository:**
+```bash
+git clone git@github.com:jcaron3012-source/CARON-Stage_M2.git
+cd CARON-Stage_M2/
+```
+Install dependencies:
+
+For HAL/PHAST tools, follow the official documentation.
+For R packages:
+```R
+install.packages(c("dplyr", "ggplot2", "tidyr", "textshape", "patchwork", "emmeans", "UpSetR", "ggbeeswarm", "cowplot", "gtools", "wesanderson", "data.table", "ComplexUpset", "ggrepel", "VennDiagram", "scales"))
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(c("karyoploteR","GenomicRanges", "GenomeInfoDb","ggtree", "ggmsa","treeio","aplot","Biostrings","RERconverge", "enrichplot","clusterProfiler"))
+```
+
+Set up environment:
+Ensure all required tools (HAL, MAF, PHAST, etc.) are in your ```PATH```.
+
 ## First steps to use the code
 
 - get the Zoonomia alignment
@@ -94,7 +134,14 @@ wget https://cgl.gi.ucsc.edu/data/cactus/447-mammalian-2022v1.hal -O zoonomia.ha
 sbatch src/slurmjobs/misc/slurm_conv.sh
 ```
 
-The workflow is then separated in four parts, each using different scripts.
+## Pipeline Overview
+
+The pipeline consists of four main analytical modules:
+
+- **A. Sequence Pleiotropy:** Quantify pleiotropy using conservation and functional scores.
+- **B. Sequence Conservation:** Compute mean conservation scores (PhastCons/PhyloP) and identify conserved regions.
+- **C. Relative Evolutionary Rates:** Extract alignments, fit evolutionary models, and analyze relative rates.
+- **D. Sequence Orthology:** Validate orthology of regulatory regions using HALPER and summit analysis.
 
 # A. Determining and quantifying sequence pleiotropy
 
@@ -151,3 +198,7 @@ bash src/slurmjobs/HALPER_pipeline/HALPER_pipeline.sh
 ```
 
 The other scripts present in this repository are used in other files, notably most of the scripts found in the ```pipelines``` repositories are used in their corresponding SLURM jobs. 
+
+## Support
+For questions or issues, please contact:
+- **Jérémy CARON:** [j.caron3012@gmail.com]   [jcaron3012-source]
