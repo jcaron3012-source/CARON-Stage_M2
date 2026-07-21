@@ -1,0 +1,202 @@
+---
+title: "Cross-Species Sequence Identity Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 7
+)
+```
+
+## 1. Load packages
+
+```{r libraries}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(cowplot)
+library(stringr)
+library(ggtree)
+library(ape)
+library(ggnewscale)
+
+theme_set(
+  theme_classic() +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(face = "bold", size = 14),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+)
+```
+
+## 2. Load the identity matrix
+
+```{r load-data}
+id = read.csv("identity_matrix.csv")
+# Columns 2:35 are per-species percent-identity values; force them to numeric
+id[, 2:35] = lapply(id[, 2:35], as.numeric)
+```
+
+## 3. Parse fasta IDs into gene, annotation category, and species count
+
+```{r parse-fasta-ids}
+annotation_levels = c("Exon", "Intron", "Distal_Intergenic",
+                        "Downstream", "5_UTR", "3_UTR", "Promoter")
+
+annot_pattern = paste(annotation_levels, collapse = "|")
+
+# The trailing "(?:_[0-9A-Za-z]+)?" is a non-capturing group: it matches and
+# discards the duplicate suffix without ever storing it.
+parse_pattern = paste0(
+  "^(.*)_(", annot_pattern, ")_([0-9]+)(?:_[0-9A-Za-z]+)*$"
+)
+
+parsed = str_match(id$fasta, parse_pattern)
+# parsed columns: [,1] full match, [,2] gene, [,3] annotation, [,4] number
+
+id = id %>%
+  mutate(
+    gene          = parsed[, 2],
+    annotation    = factor(parsed[, 3], levels = annotation_levels),
+    n_species = as.integer(parsed[, 4])
+  )
+
+# Sanity check: how many fasta IDs failed to parse?
+n_unparsed = sum(is.na(id$gene) & id$fasta != "MEAN")
+message("Unparsed fasta IDs: ", n_unparsed)
+if (n_unparsed > 0) {
+  print(id$fasta[is.na(id$gene) & id$fasta != "MEAN"])
+}
+
+table(id$annotation, useNA = "ifany")
+
+# Quick check: does percent identity scale with the number of species covered?
+summary(lm(MEAN~n_species, id))
+```
+
+## 4. Identity by annotation category
+
+```{r annotation-boxplot}
+box_by_annot = ggplot(
+  filter(id, !is.na(annotation)),
+  aes(x = reorder(annotation, MEAN, FUN = median), y = MEAN, fill = annotation)
+) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  labs(
+    title = "Sequence identity by genomic annotation category",
+    x = "Annotation", y = "Mean % identity across species"
+  ) +
+  theme(legend.position = "none")
+
+box_by_annot
+```
+
+## 5. Per-gene identity ranking
+
+```{r gene-ranking}
+gene_ranking = id %>%
+  filter(!is.na(gene)) %>%
+  group_by(gene) %>%
+  summarise(
+    mean_identity = mean(MEAN, na.rm = TRUE),
+    n_windows = n(),
+    pct_exon = 100 * mean(annotation == "Exon", na.rm = TRUE)
+  ) %>%
+  arrange(desc(mean_identity))
+
+head(gene_ranking, 20)
+tail(gene_ranking, 20)
+
+# Gene(s) covered by the largest number of windows
+max = max(gene_ranking$n_windows)
+gene_ranking[gene_ranking$n_windows == max,]$gene
+```
+
+## 6. Per-species mean identity and tree setup
+
+```{r descriptive}
+# The "MEAN" row holds the per-species average identity across all windows
+mean_by_sp = id[id$fasta == "MEAN",2:35]
+
+sorted_mean_by_sp = sort(unlist(mean_by_sp), decreasing = TRUE, na.last = TRUE)
+sorted_mean_by_sp
+
+res = data.frame(
+  species = names(sorted_mean_by_sp),
+  mean_identity = sorted_mean_by_sp
+)
+
+# Drop the "MEAN" row itself, keep only per-species values
+res = res %>%
+  filter(species != "MEAN")
+
+# Returns tip labels ordered by their vertical (y) position in the plotted
+# tree, so downstream data (e.g. bar/segment plots) can be aligned to it.
+get_tip_order = function(tree) {
+  d = ggtree::fortify(tree)
+  d = d[d$isTip, ]
+  d = d[order(d$y), ]
+  d$label
+}
+
+# Loading the tree and get the order
+tree_obj = ape::read.tree("rodents_noamericans.nh")
+
+tip_order = get_tip_order(tree_obj)
+
+# Phenotype table: species name + phenotype category, used to color tree tips
+pheno = read.csv("HelderPhenotypes2.csv", header = FALSE, col.names = c("species", "phenotype"))
+
+pheno$phenotype = factor(pheno$phenotype, levels = c("grey", "green", "orange"))
+
+helder_colors = c("grey", "forestgreen", "orange")
+helder_labels = c(grey = "Brachydonte", green = "Plan murin", orange = "Hypsodonte")
+```
+
+## 7. Tree with per-species identity bar plot
+
+```{r tree-identity-facet, fig.width = 10}
+bar_data = res %>%
+  rename(label = species) %>%
+  select(label, mean_identity)
+
+# Base tree, colored by phenotype
+tree_plot_facet = ggtree(tree_obj, layout = "roundrect", size = 0.5) %<+% pheno +
+  aes(color = phenotype) +
+  geom_tiplab(size = 4, align = TRUE, linetype = "dotted") + 
+  geom_tippoint(size = 1.5) +
+  geom_treescale(x = 0.5, y = -1, width = 0.5) +
+  scale_color_manual(
+    values = helder_colors,
+    name = "Phénotype",
+    labels = helder_labels,
+    na.value = "grey60"
+  ) +
+  theme_tree2() +
+  theme(legend.position = "left", plot.margin = margin(1, 2, 10, 10)) +
+  new_scale_color()
+
+# Add a facet panel showing each species' mean % identity to mouse as a
+# segment, with Mesocricetus_auratus highlighted separately
+fig_ab = facet_plot(
+  tree_plot_facet,
+  panel = "% d'identité moyen de la séquence\n par rapport à la séquence de la souris",
+  data = bar_data,
+  geom = geom_segment,
+  aes(x = 0, xend = mean_identity, y = y, yend = y,
+      colour = label == "Mesocricetus_auratus"),
+  linewidth = 2
+) +
+  scale_colour_manual(values = c("TRUE" = "gold", "FALSE" = "red4"), guide = "none")
+
+fig_ab
+
+tree_plot_facet
+```

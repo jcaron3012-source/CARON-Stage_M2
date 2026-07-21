@@ -1,0 +1,248 @@
+---
+title: "Phylo plots"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## 1. Load packages and set working directory
+
+```{r libraries}
+library(ggtree)
+library(ggmsa)
+library(ggplot2)
+library(treeio)
+library(aplot)
+library(dplyr)
+library(patchwork)
+library(Biostrings)
+
+setwd("~/Documents/plot_phylo")
+
+```
+
+## 2. Load input data
+
+```{r load-data}
+#File paths
+newick_file = "rodents.nh"               # Full rodent tree
+newick_file2 = "rodents_noamericans.nh"   # Tree excluding American species
+helder_file = "HelderPhenotypes.csv"     # 4-level phenotype classification
+helder_file2 = "HelderPhenotypes2.csv"    # 3-level phenotype classification (no "red")
+
+# BED file with alignment window coordinates and conservation scores
+BMP6 = read.table(
+  "~/Documents/plot_phylo/BMP6_clean.bed",
+  quote = "\"", comment.char = ""
+)
+
+# One FASTA alignment per genomic window
+dirs = list.files("fasta", full.names = TRUE)
+
+# Trees
+tree = read.tree(newick_file)
+tree2 = read.tree(newick_file2)
+
+# Phenotype tables
+pheno = read.csv(helder_file,  header = FALSE, col.names = c("species", "phenotype"))
+pheno2 = read.csv(helder_file2, header = FALSE, col.names = c("species", "phenotype"))
+
+pheno$phenotype = factor(pheno$phenotype,  levels = c("grey", "green", "orange", "red"))
+pheno2$phenotype = factor(pheno2$phenotype, levels = c("grey", "green", "orange"))
+
+rownames(pheno) = pheno$species
+rownames(pheno2) = pheno2$species
+```
+
+## 3. Color and label scheme for Helder phenotypes
+
+```{r colors}
+# Base scheme (4 categories)
+helder_colors = c(
+  grey = "grey",
+  green = "forestgreen",
+  orange = "orange",
+  red = "red3"
+)
+
+helder_labels = c(
+  grey = "Brachydont",
+  green = "Murine",
+  orange = "Hypsodont",
+  red = "Hypselodont"
+)
+
+helder_colors2 = helder_colors[c("grey", "green", "orange")]
+helder_labels2 = helder_labels[c("grey", "green", "orange")]
+```
+
+## 4. Tree-plotting function
+
+```{r tree-function}
+plot_helder_tree = function(tree, pheno_data, colors, labels, tiplab_size = 3) {
+  ggtree(tree, layout = "rectangular", size = 1) %<+% pheno_data +
+    aes(color = phenotype) +
+    geom_tiplab(size = tiplab_size, linetype = 10) +
+    geom_tippoint(size = 1.5) +
+    geom_treescale(x = 0.5, y = -1, width = 0.05) +
+    scale_color_manual(
+      values = colors,
+      name = "Helder Phenotype",
+      labels = labels,
+      na.value = "grey60"
+    ) +
+    theme_tree2() +
+    theme(legend.position = "left", plot.margin = margin(10, 2, 10, 10))
+}
+```
+
+## 5. Generating three trees
+
+```{r trees, fig.width=8, fig.height=10}
+# Full tree, 4-category phenotype
+helder_tree = plot_helder_tree(tree, pheno, helder_colors, helder_labels, tiplab_size = 5)
+helder_tree
+
+# Full tree, 3-category phenotype, larger tip labels
+helder_tree2 = plot_helder_tree(tree, pheno2, helder_colors2, helder_labels2, tiplab_size = 5)
+helder_tree2
+
+# Tree without American species, 4-category phenotype
+helder_tree3 = plot_helder_tree(tree2, pheno, helder_colors, helder_labels, tiplab_size = 5)
+helder_tree3
+```
+
+## 6. MSA window-plotting function
+
+```{r msa-function}
+# Plot a multiple sequence alignment in fixed-width windows, highlighting the
+# Mus musculus row, and stack the windows vertically.
+
+plot_msa_windows = function(filepath, aln_len, mus_index, score_label, window_size = 60) {
+
+  starts = seq(1, aln_len, by = window_size)
+  plots  = list()
+
+  for (j in seq_along(starts)) {
+    s = starts[j]
+    e = min(s + window_size - 1, aln_len)
+    show_leg = (j == length(starts))
+
+    plots[[j]] = ggmsa(
+      msa = filepath,
+      color = "Chemistry_NT",
+      font = NULL,
+      show.legend = show_leg,
+      start = s,
+      end = e
+    ) +
+      annotate("rect",
+               xmin = s - 0.5, xmax = e + 0.5,
+               ymin = mus_index - 0.5, ymax = mus_index + 0.5,
+               fill = "white", alpha = 0.25,
+               color = "black", linewidth = 0.3
+      ) +
+      scale_x_continuous(breaks = c(s, e), labels = c(s, e)) +
+      theme(
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.margin = margin(1, 5, 1, 2),
+        legend.position = if (show_leg) "bottom" else "none",
+        legend.text = element_text(size = 7),
+        legend.title = element_text(size = 8, face = "bold")
+      )
+  }
+
+  wrap_plots(plots, ncol = 1) +
+    plot_annotation(
+      title = paste0(basename(filepath), "\n", score_label),
+      theme = theme(plot.title = element_text(size = 9, face = "bold", hjust = 0.5))
+    )
+}
+```
+
+## 7. Build an MSA plot for every window
+
+```{r msa-loop}
+MSA_WINDOW_SIZE = 100
+
+n_files = length(dirs)
+p_msa = vector("list", n_files)
+score_values = numeric(n_files)
+aln_lengths = numeric(n_files)
+
+for (i in seq_along(dirs)) {
+  filepath = dirs[i]
+  base = basename(filepath)
+
+  # Extract "chrN_start_end" from the filename to look up its score
+  coords = regmatches(base, regexpr("(chr[0-9XY]+)_(\\d+)_(\\d+)", base))
+  hit = if (length(coords) > 0) bed_scores %>% filter(key == coords) else data.frame()
+
+  score_label = if (nrow(hit) > 0) {
+    paste0("score: ", round(hit$V4[1], 4), " | ", round(hit$V5[1], 4))
+  } else {
+    "score: N/A"
+  }
+  score_values[i] = if (nrow(hit) > 0) hit$V4[1] else NA
+
+  seqs = readDNAStringSet(filepath)
+  aln_len = unique(width(seqs))
+  aln_lengths[i] = aln_len
+  mus_index = which(grepl("Mus_musculus", names(seqs), ignore.case = TRUE))
+
+  p_msa[[i]] = plot_msa_windows(
+    filepath = filepath,
+    aln_len = aln_len,
+    mus_index = mus_index,
+    score_label = score_label,
+    window_size = MSA_WINDOW_SIZE
+  )
+
+  message("Plot created: ", base, " - ", score_label)
+}
+```
+
+## 8. Export each MSA plot to PDF
+
+```{r export-pdf}
+for (i in seq_along(p_msa)) {
+  out_name = paste0("msa_", tools::file_path_sans_ext(basename(dirs[i])), ".pdf")
+
+  pdf(
+    out_name,
+    width  = 14,
+    height = 3 * ceiling(aln_lengths[i] / MSA_WINDOW_SIZE)
+  )
+  print(paste("Created",out_name))
+  print(p_msa[[i]])
+  dev.off()
+}
+```
+
+## 9. Highlight the lowest- and highest-scoring windows
+
+```{r minmax-mosaic, fig.width=14, fig.height=8}
+idx_max = which.max(score_values)
+idx_min = which.min(score_values)
+
+mosaic_minmax = wrap_plots(
+  list(p_msa[[idx_min]], p_msa[[idx_max]]),
+  ncol = 2, nrow = 1
+) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title = paste0(
+      "Min: ", round(score_values[idx_min], 4), " (", basename(dirs[idx_min]), ")",
+      "   |   Max: ", round(score_values[idx_max], 4), " (", basename(dirs[idx_max]), ")"
+    ),
+    theme = theme(
+      plot.title      = element_text(size = 10, face = "bold", hjust = 0.5),
+      legend.position = "bottom"
+    )
+  )
+
+mosaic_minmax
+```

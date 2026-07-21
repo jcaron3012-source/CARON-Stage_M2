@@ -1,0 +1,822 @@
+---
+title: "scores data analysis"
+author: "jcaron01"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    fig_width: 10
+    fig_height: 7
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 7
+)
+```
+
+# 1. Setup
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(textshape)
+library(patchwork)
+library(emmeans)
+library(UpSetR)
+library(ggbeeswarm)
+library(karyoploteR)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(pheatmap)
+library(igraph)
+library(ggraph)
+library(cowplot)
+library(gtools)
+library(wesanderson)
+library(ggrepel)
+library(VennDiagram)
+library(grid)
+library(scales)
+
+theme_set(
+  theme_classic() +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(face = "bold", size = 14),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+)
+```
+
+# 2. Data import
+
+```{r column-names}
+# Column names for the raw BED-like CRE annotation files loaded below
+col_names = c("chr","start","end","gene","present_in","n_clusters","distanceToTSS","annotation","GC.percent","width","scores")
+```
+
+## 2.2 Helper function to read score files
+
+```{r read-helpers}
+# Read a BED-like CRE annotation file and tag its conservation score column
+# with the name of the underlying metric (phastCons or phylop)
+read_cre = function(path, phast) {
+  df = read.delim(path, header = FALSE)
+  colnames(df) = col_names
+  df$chr = as.factor(df$chr)
+  df$annotation = as.factor(df$annotation)
+  df = df %>% mutate(width = end-start)
+  df[[paste0("scores_", phast)]] = as.numeric(df$scores)
+  df$scores = NULL
+  df$gene = as.factor(df$gene)
+  df
+}
+```
+
+## 2.3 Load the CRE table
+
+```{r load-main}
+# Load each score type separately, then merge them into a single table
+phastcons = read_cre("~/Documents/scores/mus_phastcons_v2.bed", "phastcons")
+phylop = read_cre("~/Documents/scores/mus_phyloP_v2.bed", "phylop")
+
+mus_scores = phastcons %>%
+  left_join(phylop)
+
+rm(phastcons)
+rm(phylop)
+```
+
+## 2.4 Load coverage information
+
+```{r load-coverage}
+cov = read.delim("~/Documents/scores/coverage_CREs.bed", header = FALSE) 
+col_cov = c("chr", "start", "end", "gene", "clusters", "n_clusters",   "distanceToTSS", "annotation", "GC.percent",   "width","scores_phastcons", "n_features", "n_bases", "length", "coverage") 
+colnames(cov) = col_cov
+# Keep only the columns needed to join coverage onto the main score table
+cov = cov[, c("chr","start","end","gene","coverage")]
+cov$chr = as.factor(cov$chr)
+cov$gene = as.factor(cov$gene)
+
+mus = mus_scores %>%
+  left_join(cov)
+
+rm(mus_scores)
+rm(cov)
+
+# Drop annotation categories with not enough data
+mus = mus %>% 
+  filter(annotation != "Downstream") %>% 
+  filter(annotation != "5_UTR") %>% 
+  droplevels()
+```
+
+# 3. Creating new features
+
+## 3.1 Annotation helper functions
+
+```{r annotation-helpers}
+# Number of comma-separated elements in a string
+number_elements = function(x) if (!is.na(x)) length(trimws(strsplit(x, ",")[[1]])) else 0
+
+# Detect clusters (md/mx collapsed) that appear more than once, i.e. pleiotropic
+# across replicates of the same cluster
+detect_pleiotropy = function(x) {
+  elements  = trimws(strsplit(x, ",")[[1]])
+  prefixes  = sub("\\-(md|mx)$", "", elements)
+  pleio  = prefixes[duplicated(prefixes) | duplicated(prefixes, fromLast = TRUE)]
+  if (length(pleio) == 0) return(NA)
+  paste(unique(pleio), collapse = ", ")
+}
+
+# Extract only the elements that match a given md/mx suffix
+extract_suffix = function(x, suffix) {
+  elements = trimws(strsplit(x, ",")[[1]])
+  sfx = sub("^(epi|mes|Endothelium)\\-[1-7]\\-", "", elements)
+  sfx = sub("^(Endothelium)\\-", "", sfx)
+  matched  = elements[sfx == suffix]
+  if (length(matched) == 0) return(NA)
+  paste(matched, collapse = ", ")
+}
+
+# Count how many elements of a comma-separated column match a regex pattern
+count_type = function(col, pattern) {
+  sapply(strsplit(col, ",\\s*"), function(x) sum(grepl(pattern, trimws(x))))
+}
+
+# Collapse replicate-level labels down to unique cluster names
+detect_cluster = function(x) {
+  paste(unique(sub("\\-(md|mx)$", "", trimws(strsplit(x, ",")[[1]]))), collapse = ", ")
+}
+
+# Remove specific clusters (e.g. noisy/low-quality ones) from a comma-separated list
+filter_clusters = function(x, exclude = c("mes-3", "Endothelium")) {
+  elements = trimws(strsplit(x, ",")[[1]])
+  kept = elements[!(elements %in% exclude)]
+  if (length(kept) == 0) return(NA)
+  paste(kept, collapse = ", ")
+}
+```
+
+## 3.2 Add new variables in the dataframe
+
+```{r feature-engineering}
+# Cluster membership, cleaned of excluded clusters
+mus$clusters = sapply(mus$present_in, detect_cluster)
+mus$clusters = sapply(mus$clusters, filter_clusters)
+mus = mus %>%
+  filter(!is.na(clusters))
+mus$n_clusters = sapply(mus$clusters, number_elements)
+
+# Pleiotropy: clusters found in more than one replicate
+mus$pleio_clusters = sapply(mus$present_in, detect_pleiotropy)
+mus$n_pleio = sapply(mus$pleio_clusters, number_elements)
+
+# md / mx (lower / upper) subsets and their counts
+mus$mx_clusters = sapply(mus$present_in, extract_suffix, suffix = "mx")
+mus$md_clusters = sapply(mus$present_in, extract_suffix, suffix = "md")
+mus$n_mx  = sapply(mus$mx_clusters, number_elements)
+mus$n_md  = sapply(mus$md_clusters, number_elements)
+
+# Epithelium / mesenchyme cluster counts
+mus$n_epi = count_type(mus$clusters, "^epi\\-")
+mus$n_mes = count_type(mus$clusters, "^mes\\-")
+
+mus = mus %>% mutate(
+  only_mx = n_mx > 0 & n_md == 0,
+  only_md = n_md > 0 & n_mx == 0,
+  only_pleio = ifelse(n_pleio > 0, n_pleio * 2 == n_mx + n_md, FALSE),
+  only_epi = n_epi > 0 & n_mes == 0,
+  only_mes = n_epi == 0 & n_mes > 0,
+  spécificité = case_when(only_md | only_mx ~ "Modulaire",TRUE ~ "Pléiotrope"),
+  conservation = ifelse(coverage > .5, "Conservé","Non conservé"),
+  range_clusters = factor(
+    case_when(n_clusters == 1 ~ "Specific", n_clusters == 2 ~ "2",
+              n_clusters == 3 ~ "3", TRUE ~ ">3"),
+    levels = c("Specific", "2", "3", ">3")
+  )
+)
+
+# Natural sort of chromosome names instead of lexical order
+mus$chr = factor(mus$chr, levels = mixedsort(levels(mus$chr)))
+```
+
+# 4. Exploratory analysis
+
+## 4.1 Missing data and score summaries
+
+```{r na-summary}
+# Report NA counts and summary statistics for each conservation score column
+for (score_var in c("scores_phastcons", "scores_phylop")) {
+  print(paste(score_var,"info:"))
+  print("#NA:")
+  print(table(is.na(mus[[score_var]])))
+  print("Summary:")
+  print(summary(mus[[score_var]]))
+}
+```
+
+## 4.2 Peak classification counts
+
+```{r classification-counts}
+# CRE count per annotation category, sorted from most to least common
+mus %>%
+  count(annotation, name = "n") %>%
+  arrange(desc(n))
+```
+
+# 5. Linear models
+
+```{r model-fitting-function}
+# Fit a linear model with stepwise term selection, then print its summary and ANOVA table
+fit_model = function(formula_str, data) {
+  m = step(lm(as.formula(formula_str), data = data))
+  print(summary(m))
+  print(anova(m))
+  m
+}
+```
+
+## 5.1 phastCons model
+
+```{r model-phastcons}
+model_phastcons = fit_model("scores_phastcons ~ n_clusters*annotation*width", mus)
+plot(emmeans(model_phastcons, ~ annotation), comparisons = TRUE)
+```
+
+## 5.2 phylop model
+
+```{r model-phylop}
+model_phylop = fit_model("scores_phylop ~ n_clusters*annotation*width", mus)
+plot(emmeans(model_phylop, ~ annotation), comparisons = TRUE)
+```
+
+## 5.3 Other models
+
+```{r model-clusters-vs-annotation}
+# Does the number of clusters differ significantly across annotation categories?
+anova(lm(n_clusters ~ annotation, mus))
+
+#Are PhastCons and PhyloP scores correlated ? 
+cor(mus$scores_phastcons, mus$scores_phylop, use = "pairwise.complete.obs")
+```
+
+# 6. Summary statistics by classification
+
+```{r summary-by-classification}
+# Mean, median, sd of each score, plus sample size, per annotation category
+mus %>%
+  group_by(annotation) %>%
+  summarise(across(c(scores_phastcons, scores_phylop),
+                    list(mean = ~ mean(.x, na.rm = TRUE),
+                         median = ~ median(.x, na.rm = TRUE),
+                         sd = ~ sd(.x, na.rm = TRUE)),
+                    .names = "{.fn}_{.col}"),
+            n = n())
+```
+
+# 7. Plotting functions
+
+```{r plotting-functions}
+# Pie chart of the distribution of a categorical variable
+classif_pie = function(df, fill_var, title,
+                        palette = scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous"))) {
+
+  dat = as.data.frame(table(df[[fill_var]]))
+  colnames(dat) = c("groupe", "n")
+  dat$pct   = round(dat$n / sum(dat$n) * 100, 1)
+  dat$label = paste0(dat$groupe, "\n", dat$pct, "%")
+
+  ggplot(dat, aes(x = "", y = n, fill = groupe)) +
+    geom_col(width = 1, color = "white") +
+    palette +
+    coord_polar(theta = "y") +
+    # tous les labels SAUF 3_UTR, positionnement normal
+    geom_label(data = subset(dat, groupe != "3_UTR"),
+               aes(label = label), position = position_stack(vjust = 0.5),
+               size = 3, show.legend = FALSE) +
+    # uniquement 3_UTR, décalé pour éviter le chevauchement
+    geom_label(data = subset(dat, groupe == "3_UTR"),
+               aes(x = 1, y = .8, label = label),
+               size = 2.8, show.legend = FALSE, inherit.aes = FALSE,
+               fill = "#3B8EA5", color = "black") +
+    labs(title = title, fill = fill_var) +
+    theme_void() +
+    theme(legend.position = "none", title = element_text(face = "bold"))
+}
+
+# Mean score (with bootstrap CI) by a grouping variable, annotated with sample size
+score_point = function(df, x, score_var, title, x_label, y_label, facet = FALSE, fill = "annotation", palette = scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous"))) {
+  n_fun = function(y) {
+    data.frame(y = mean(y, na.rm = TRUE)*1.1, label = paste0("n=", length(y)))
+  }
+  
+  p = ggplot(df, aes(x = .data[[x]], y = .data[[score_var]], fill = .data[[fill]])) +
+    stat_summary(fun.data = mean_cl_boot, geom = "pointrange",
+                 shape = 21, color = "black", size = 0.8) +
+    stat_summary(fun.data = n_fun, geom = "text", size = 3, color = "black") +
+    palette +
+    labs(title = title, x = x_label, y = y_label) + 
+    theme(legend.position = "None")
+  if (facet) p = p + facet_wrap(~ annotation, scales = "free")
+  p
+}
+
+# Mean score (with bootstrap CI) as a function of the number of clusters
+score_by_cluster_pointrange = function(df, x_var, score_var, color, title, y_lab, facet = FALSE) {
+  p = ggplot(df, aes(x = factor(.data[[x_var]]), y = .data[[score_var]])) +
+    stat_summary(fun.data = mean_cl_boot, geom = "pointrange", size = 0.8, color = color,
+                 fun.args = list(conf.int = 0.95, B = 1000)) +
+    labs(title = title, x = "Nombre de types cellulaires", y = y_lab)
+  if (facet) p = p + facet_wrap(~ annotation, scales = "free")
+  p
+}
+
+# Generic boxplot of a score variable by any categorical variable, faceted by classification
+score_boxplot_facet = function(df, x_var, score_var, title) {
+  n_fun = function(x) {
+    data.frame(y = max(x) * 1.05, label = paste0("n=", length(x)))
+  }
+  ggplot(df, aes(x = .data[[x_var]], y = .data[[score_var]], fill = .data[[x_var]])) +
+    geom_boxplot(alpha = 0.7) +
+    stat_summary(fun.data = n_fun, geom = "text", size = 3) +
+    facet_wrap(~ annotation, scales = "free") +
+    scale_fill_manual(values = wes_palette("Cavalcanti1")) +
+    labs(title = title) +
+    theme(legend.position = "none")
+}
+```
+
+# 8. Descriptive plots
+
+## 8.1 Overall distribution of CRE classifications
+
+```{r plot-classification-pie}
+pie_annotation = classif_pie(mus, "annotation", "Distribution des région régulatrices")
+pie_annotation
+```
+
+## 8.2 Score distributions, conservation, and pleiotropy per classification
+
+```{r plot-score-distributions, fig.height=8}
+pleio_vs_specif = score_point(mus, "spécificité", "scores_phastcons", "Scores PhastCons moyens:\n Modulaire vs Pléiotrope", "Spécificité", "PhastCons moyen", facet = T, fill = "spécificité", palette = scale_fill_manual(values = wes_palette("GrandBudapest2")))
+scores_vs_anno = score_point(mus, "annotation", "scores_phastcons", "Scores PhastCons moyens par annotation", "Annotation", "PhastCons moyen")
+scores_vs_cons = score_boxplot_facet(mus, "conservation", "scores_phastcons", paste("Score Phastcons: conservé vs non-conservé par annotation"))
+pleio_vs_specif
+scores_vs_cons
+scores_vs_anno
+```
+
+## 8.3 Clusters per classification
+
+```{r plot-clusters-per-classification}
+ggplot(mus, aes(x = factor(n_clusters), fill = annotation)) +
+  geom_bar(position = "dodge") + scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous")) + labs(title = "Clusters per classification")
+```
+
+## 8.4 CREs per chromosome
+
+```{r plot-cre-per-chromosome}
+cre_per_chrom = ggplot(mus, aes(x = chr, fill = annotation)) +
+  geom_bar(position = "fill") + scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous")) + labs(title = "Annotations des régions régulatrices par chromosome", x = "Chromosome", y = "Pourcentage")
+cre_per_chrom
+```
+
+## 8.5 Conservation per classification
+
+```{r plot-conservation-per-classification}
+cons_vs_anno = ggplot(mus, aes(x = annotation, fill = conservation)) +
+    geom_bar(position = "fill") +
+    scale_fill_manual(values = wes_palette("Cavalcanti1")) +
+    labs(title = "Conservation par classification", y = "Pourcentage")
+cons_vs_anno
+```
+
+## 8.7 Mean conservation score by number of clusters
+
+```{r plot-score-by-cluster}
+scores_vs_n_clusters = score_by_cluster_pointrange(mus, "n_clusters", "scores_phastcons", "red4", "Score PhastCons moyen par nombre de types cellulaires", "PhastCons moyen")
+scores_vs_n_clusters
+```
+
+## 8.8 Mean number of clusters per classification
+
+```{r plot-mean-clusters}
+mean_clusters = ggplot(mus, aes(x = annotation, y = n_clusters, fill = annotation)) +
+  stat_summary(fun = mean, geom = "bar") +
+  scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous")) +
+  labs(title = "Nombre moyen de types cellulaires par annotation", x = "Annotation", y = "Moyenne") +
+  theme(legend.position = "None")
+mean_clusters
+```
+
+## 8.9 Conservation score vs. CRE width (binned)
+
+```{r plot-score-vs-width}
+# Bin CREs into 10 equal-sized width quantiles, then average each score per bin
+mus_num = mus %>%
+  select(width, scores_phastcons, scores_phylop) %>%
+  mutate(bin = cut_number(width, n = 10))
+
+bins = mus_num %>%
+  group_by(bin) %>%
+  summarise(
+    width = mean(width, na.rm = TRUE),
+    scores_phastcons = mean(scores_phastcons, na.rm = TRUE),
+    scores_phylop    = mean(scores_phylop, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+colors = c(scores_phastcons = "red4", scores_phylop = "purple4")
+nice_labels = c(scores_phastcons = "Score PhastCons", scores_phylop = "PhyloP score")
+
+plots = list()
+for (sv in c("scores_phastcons", "scores_phylop")) {
+  p = ggplot(bins, aes(x = bin, y = .data[[sv]], group = 1)) +
+    geom_line(color = colors[[sv]], linewidth = 1, alpha = 0.5) +
+    geom_point(shape = 21, size = 3.5, fill = colors[[sv]], color = "white",
+               stroke = 0.6) +
+    labs(
+      title  = paste(nice_labels[[sv]], "en fonction de la taille de la séquence"),
+      x = "Bins de taille (bp)",
+      y = nice_labels[[sv]]
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+  plots[[sv]] = p
+  print(p)
+}
+
+# Same binning, but split out by annotation category
+mus_num = mus %>%
+  select(width, scores_phastcons, scores_phylop, annotation) %>%
+  mutate(bin = cut_number(width, n = 10))
+
+bins = mus_num %>%
+  group_by(annotation, bin) %>%
+  summarise(
+    width = mean(width, na.rm = TRUE),
+    scores_phastcons = mean(scores_phastcons, na.rm = TRUE),
+    scores_phylop    = mean(scores_phylop, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+colors = c(scores_phastcons = "red4", scores_phylop = "purple4")
+nice_labels = c(scores_phastcons = "PhastCons score", scores_phylop = "PhyloP score")
+
+plots_facet = list()
+for (sv in c("scores_phastcons", "scores_phylop")) {
+  p = ggplot(bins, aes(x = bin, y = .data[[sv]], group = 1)) +
+    geom_line(color = colors[[sv]], linewidth = 1, alpha = 0.5) +
+    geom_point(shape = 21, size = 3.5, fill = colors[[sv]], color = "white",
+               stroke = 0.6) +
+    facet_wrap(~annotation, scales = "free_y") +
+    labs(
+      title = paste(nice_labels[[sv]], "vs width"),
+      subtitle = "Mean by bin (15 quantiles)",
+      x = "Width bins (bp)",
+      y = nice_labels[[sv]]
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "grey40", size = 10, margin = margin(b = 10)),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+  plots_facet[[sv]] = p
+  print(p)
+}
+scores_vs_width = plots$scores_phastcons
+scores_vs_width_facet = plots_facet$scores_phastcons
+```
+
+## 8.10 Genomic density of CREs by chromosome
+
+```{r plot-density-by-chr}
+density = ggplot(mus, aes(x = start, fill = chr)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ chr, scales = "free") +
+  scale_fill_manual(values = wes_palette("Zissou1", n = 21, type = "continuous")) +
+  labs(title = "Density of CREs by Chromosome") +
+  theme(legend.position = "none")
+density
+```
+
+# 9. Pleiotropy and tissue-specificity pie charts
+
+## 9.1 Pleiotropy (mx vs md vs pleiotropic)
+
+```{r plot-pleio-pie}
+pie_pleio = classif_pie(mus, "spécificité","Distribution de la pléiotropie", palette = scale_fill_manual(values = wes_palette("GrandBudapest2")))
+
+pie_pleio
+```
+
+## 9.2 Tissue specificity (epithelium vs mesenchyme)
+
+```{r plot-tissue-pie}
+mus |>
+  count(only_epi, only_mes) |>
+  mutate(
+    label = case_when(only_epi ~ "only epi", only_mes ~ "only mes", TRUE ~ "not specific"),
+    pct   = round(n / sum(n) * 100, 1)
+  ) |>
+  ggplot(aes(x = "", y = n, fill = label)) +
+  geom_col(width = 1, color = "white", linewidth = 0.5) +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = paste0(pct, "%")), position = position_stack(vjust = 0.5), size = 4, fontface = "bold") +
+  scale_fill_hue() +
+  labs(title = "Data distribution of tissues", fill = NULL) +
+  theme_void() +
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+```
+
+## 9.3 Pleiotropy (specific vs not) per classification
+
+```{r plot-pleio-per-classification}
+pleio_per_anno = ggplot(mus, aes(x = annotation, fill = spécificité)) +
+  geom_bar(position = "fill") + scale_fill_manual(values = wes_palette("GrandBudapest2")) + labs(title = "Pléiotropie par annotation", y = "Pourcentage")
+pleio_per_anno
+```
+
+# 11. Replicate-level analysis within the epithelium
+
+```{r epi-replicate-function}
+# For a given epithelium replicate i, classify each CRE as pleiotropic
+# (present in both md/mx forms) or modular (present in only one)
+analyze_epi = function(df, i) {
+  epi_col = count_type(df$present_in, paste0("^epi-", i, "\\-"))
+  df %>%
+    mutate(
+      in_epi = epi_col > 0,
+      pleio_epi = epi_col == 2,
+      condition = case_when(pleio_epi ~ "pleio", in_epi & !pleio_epi ~ "modular")
+    ) %>%
+    filter(!is.na(condition))
+}
+```
+
+```{r epi-replicate-combine}
+# Run the epithelium classification across all 7 replicates and combine the results
+epi_results_combined = bind_rows(
+  lapply(1:7, function(i) {
+    d = analyze_epi(mus, i)
+    if (nrow(d) > 0) mutate(d, epi = paste0("epi-", i)) else NULL
+  })
+) %>%
+  mutate(annotation = as.factor(annotation)) %>%
+  filter(!annotation %in% "5_UTR") %>%
+  mutate(annotation = droplevels(annotation))
+```
+
+```{r epi-replicate-plot-function}
+# Bar plot (mean +/- bootstrap CI) of a score by condition, faceted by
+# epithelium replicate, annotation, and cluster-count range
+epi_bar_plot = function(df, score_var, y_label, title) {
+  ggplot(df, aes(x = condition, y = .data[[score_var]], fill = annotation)) +
+    stat_summary(fun = mean, geom = "bar") +
+    stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.25, linewidth = 0.5) +
+    scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous")) +
+    facet_grid(epi ~ annotation + range_clusters, scales = "free") +
+    labs(x = "Condition", y = y_label, title = title) +
+    theme(legend.position = "none")
+}
+```
+
+```{r epi-replicate-plots, fig.width=14, fig.height=12}
+epi_bar_plot(epi_results_combined, "scores_phastcons", "Phastcons score",
+             "Phastcons vs condition by epi and number of clusters")
+epi_bar_plot(epi_results_combined, "scores_phylop",    "phylop score",
+             "phylop vs condition by epi and number of clusters")
+```
+
+# 11.2 Replicate-level analysis within the mesenchyme
+
+```{r mes-replicate-function}
+# Same logic as analyze_epi(), applied to mesenchyme replicates
+analyze_mes = function(df, i) {
+  mes_col = count_type(df$present_in, paste0("^mes-", i, "\\-"))
+  df %>%
+    mutate(
+      in_mes    = mes_col > 0,
+      pleio_mes = mes_col == 2,
+      condition = case_when(pleio_mes ~ "pleio", in_mes & !pleio_mes ~ "modular")
+    ) %>%
+    filter(!is.na(condition))
+}
+```
+
+```{r mes-replicate-combine}
+# Run the mesenchyme classification across all 7 replicates, dropping the
+# noisy mes-3 replicate, and combine the results
+mes_results_combined = bind_rows(
+  lapply(1:7, function(i) {
+    d = analyze_mes(mus, i)
+    if (nrow(d) > 0) mutate(d, mes = paste0("mes-", i)) else NULL
+  })
+) %>%
+  mutate(annotation = as.factor(annotation)) %>%
+  filter(!annotation %in% c("Downstream", "5_UTR")) %>%
+  mutate(annotation = droplevels(annotation)) %>%
+  filter(mes != "mes-3")
+```
+
+```{r mes-replicate-plot-function}
+# Same bar-plot logic as epi_bar_plot(), faceted by mesenchyme replicate instead
+mes_bar_plot = function(df, score_var, y_label, title) {
+  ggplot(df, aes(x = condition, y = .data[[score_var]], fill = annotation)) +
+    stat_summary(fun = mean, geom = "bar") +
+    stat_summary(fun.data = mean_cl_boot, geom = "errorbar", width = 0.25, linewidth = 0.5) +
+    scale_fill_manual(values = wes_palette("Zissou1", n = 5, type = "continuous")) +
+    facet_grid(mes ~ annotation + range_clusters, scales = "free") +
+    labs(x = "Condition", y = y_label, title = title) +
+    theme(legend.position = "none")
+}
+```
+
+```{r mes-replicate-plots, fig.width=14, fig.height=12}
+mes_bar_plot(mes_results_combined, "scores_phastcons", "Phastcons score",
+             "Phastcons vs condition by mes and number of clusters")
+mes_bar_plot(mes_results_combined, "scores_phylop",    "phylop score",
+             "phylop vs condition by mes and number of clusters")
+```
+
+# 12. UpSet plots
+
+```{r upset-function}
+# Build an UpSet plot from a list of logical membership vectors
+make_upset = function(df, sets_list, sets_names) {
+  d = as.data.frame(setNames(lapply(sets_list, as.integer), sets_names))
+  UpSetR::upset(d, sets = sets_names, order.by = "freq", text.scale = 1.3,
+        mainbar.y.label = "Number of CREs", sets.x.label = "Total",
+        main.bar.color = "#443983", sets.bar.color = "#31688e", matrix.color = "#35b779")
+}
+```
+
+## 12.1 Tissue overlap
+
+```{r upset-tissue}
+make_upset(mus,
+           list(mus$n_epi > 0, mus$n_mes > 0),
+           c("Epithelium", "Mesenchyme"))
+```
+
+## 12.2 md / mx / pleiotropy overlap
+
+```{r upset-mdmx}
+make_upset(mus,
+           list(mus$n_mx > 0, mus$n_md > 0, mus$n_pleio > 0),
+           c("mx", "md", "pleio"))
+```
+
+## 12.3 Conservation / specificity / pleiotropy overlap
+
+```{r upset-cons}
+make_upset(mus,
+           list(mus$conservation == "Conservé", mus$only_md, mus$only_mx, mus$n_pleio > 0),
+           c("conserved", "only_md", "only_mx", "pleio"))
+```
+
+# 13. Plots
+
+## 13.1 Figures for internship report
+
+```{r plot-rapport}
+# Combine individual plots from previous sections into multi-panel report figures
+fig_ab = cowplot::plot_grid(pie_annotation, mean_clusters, ncol = 2, labels = c("a", "b"), label_size = 30)
+fig_1 = cowplot::plot_grid(fig_ab, cre_per_chrom, nrow = 2, labels = c("","c"), label_size = 30)
+fig_1
+
+fig_2 = cowplot::plot_grid(pie_pleio, pleio_per_anno, ncol = 2, labels = c("a", "b"), label_size = 30)
+fig_2
+
+fig_3 = cowplot::plot_grid(scores_vs_anno, pleio_vs_specif, scores_vs_n_clusters,scores_vs_width, labels = c("a","b","c","d"), label_size = 30)
+fig_3
+
+fig_4 = cowplot::plot_grid(cons_vs_anno, scores_vs_cons, nrow = 2, labels = c("a","b"), label_size = 30)
+fig_4
+```
+
+## 13.2 Venn diagram
+
+```{r plot-venn-mouse-hamster}
+souris_total = 265138
+hamster_total = 167268
+intersection = 66353
+
+#Exclusive zones
+souris_seule = souris_total - intersection
+hamster_seul = hamster_total - intersection
+
+# Création du diagramme
+draw.pairwise.venn(
+  area1 = souris_total,
+  area2 = hamster_total,
+  cross.area = intersection,
+  fill = c("#4C72B0", "#DD8452"),       
+  alpha = 0.7,                          
+  lty = "blank",                        
+  cex = 1.5,                            
+  fontfamily = "sans",
+  cat.cex = 1.6,                       
+  cat.fontface = "bold",
+  cat.fontfamily = "sans",
+  cat.pos = c(-20, 20),                 
+  cat.dist = c(0.05, 0.05),
+  scaled = TRUE,                        
+  euler.d = TRUE,
+  title = "Intersection entre les séquences du hamster et de la souris"
+)
+```
+
+## 13.3 liftOver information
+
+```{r plot-liftover-before-after}
+df = data.frame(
+  espece      = c("Souris", "Hamster"),
+  version_av  = c("mm39", "MesAur2.0"),
+  version_ap  = c("mm38", "MesAur1.0"),
+  avant       = c(268325, 264514),
+  apres       = c(265138, 167268)
+)
+
+df$pct_perdu = 100 * (df$avant - df$apres) / df$avant
+
+ggplot(df, aes(x = espece)) +
+  geom_col(aes(y = avant, fill = version_av), width = 0.6) +
+  geom_col(aes(y = apres, fill = version_ap), width = 0.35) +
+  geom_text(aes(y = avant, label = format(avant, big.mark = " ")),
+            vjust = -.5, size = 4) +
+  geom_text(aes(y = apres, label = format(apres, big.mark = " ")),
+            vjust = 2, size = 4) +
+  geom_text(aes(y = avant, label = paste0("-", round(pct_perdu, 1), " %")),
+            vjust = -2.2, size = 5, fontface = "bold", color = "darkred") +
+  scale_fill_manual(
+    values = c("mm39" = "#4C72B0", "mm38" = "#A9C4EB",
+               "MesAur2.0" = "#DD8452", "MesAur1.0" = "#F3C6A6"),
+    name = "Version du génome"
+  ) +
+  labs(
+    title = "Nombre de données avant/après liftOver pour la souris et le hamster",
+    subtitle = "Barres claires: valeurs après liftOver",
+    x = NULL, y = "Nombre de séquences cis-régulatrices"
+  ) +
+  ylim(0, max(df$avant) * 1.3)
+```
+
+## 13.4 Orthologous regions pie chart
+
+```{r plot-orthologous-region-pie}
+data = data.frame(
+  categorie = c("Distal_Intergenic", "Downstream", "Exon", "Intron", "Promoter"),
+  effectif = c(37873, 77, 3180, 22307, 2916)
+)
+
+data$pourcentage = data$effectif / sum(data$effectif) * 100
+data$label = paste0(data$categorie, "\n", scales::comma(data$effectif), 
+                      " (", round(data$pourcentage, 1), "%)")
+
+data$categorie = factor(data$categorie, levels = data$categorie[order(-data$effectif)])
+
+palette_zissou = wes_palette("Zissou1", n = 5, type = "continuous")
+
+p = ggplot(data, aes(x = "", y = effectif, fill = categorie)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = palette_zissou) +
+  geom_text(aes(label = paste0(round(pourcentage, 1), "%")),
+            position = position_stack(vjust = 0.5), size = 4, fontface = "bold") +
+  labs(
+    title = "Distribution des régions orthologues",
+    fill = "Catégorie"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 14)
+  )
+
+print(p)
+```

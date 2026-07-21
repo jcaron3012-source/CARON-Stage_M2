@@ -1,0 +1,367 @@
+---
+title: "RERconverge Analysis"
+output: html_document
+---
+
+```{r setup-knitr, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## 1. Load packages and input data
+
+```{r libraries-data}
+library(RERconverge)
+library(data.table)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(ComplexUpset)
+library(wesanderson)
+library(ComplexUpset)
+library(ggplot2)
+library(wesanderson)
+library(enrichplot)
+library(clusterProfiler)
+
+setwd("~/Documents/RERConverge")
+
+# Phenotype table: column 1 = species name, column 2 = phenotype category
+pheno = read.csv("HelderPhenotypes_3cat.csv", header = FALSE)
+
+# Species used as the foreground set for RER/phenotype correlation
+# (first foreground group)
+foreground = c(
+  "Rattus_norvegicus",
+  "Mus_musculus",
+  "Mus_spretus",
+  "Mus_caroli",
+  "Mus_pahari",
+  "Acomys_cahirinus",
+  "Cricetomys_gambianus"
+)
+
+# Second foreground group, used for the 2-vs-3 comparison / plots
+foreground2 = c(
+  "Meriones_unguiculatus",
+  "Psammomys_obesus",
+  "Microtus_ochrogaster",
+  "Ondatra_zibethicus",
+  "Ellobius_talpinus",
+  "Ellobius_lutescens",
+  "Sigmodon_hispidus",
+  "Nannospalax_galili",
+  "Jaculus_jaculus",
+  "Allactaga_bullata",
+  "Dipodomys_stephensi",
+  "Dipodomys_ordii",
+  "Castor_canadensis",
+  "Aplodontia_rufa"
+)
+```
+
+## 2. Helper: summarize a pairwise phenotype comparison
+
+```{r summarize-comparison-helper}
+# Prints a short summary (top hits, best peak, significant/NA counts) for a
+# single pairwise result table, and returns the row with the lowest p-value.
+summarize_comparison = function(res_pair, label) {
+  message(paste0("Top 5 results for ", label, ":"))
+  print(head(res_pair[order(res_pair$P, na.last = TRUE), ], 5))
+
+  # Row with the smallest p-value = strongest peak for this comparison
+  best_peak = res_pair[which.min(res_pair$P), ]
+  message(paste0(
+    "Best peak for ", label, ": ", rownames(best_peak),
+    " with p-value: ", best_peak$P, " and Rho: ", best_peak$Rho
+  ))
+
+  message(paste0("Count of significant p-values (p < 0.05) in ", label, ":"))
+  print(table(res_pair$P < 0.05))
+
+  message(paste0("Count of NA values in ", label, ":"))
+  print(table(is.na(res_pair$P)))
+
+  best_peak
+}
+```
+
+## 3. getStats(): read tree, compute RERs, correlate with phenotype
+
+```{r getstats-function}
+# Main analysis function:
+#  - reads the tree file
+#  - computes relative evolutionary rates (RERs)
+#  - converts the categorical phenotype into tree paths
+#  - correlates RERs with the phenotype, globally and pairwise
+getStats = function(tree_file, pheno, plot_avg = FALSE, check_pairs = TRUE) {
+
+  message("Reading tree from file...")
+  tree = readTrees(tree_file)
+  message("Tree file read.")
+
+  message("Calculating RERs...")
+  mamRER = getAllResiduals(tree, transform = "sqrt", use.weights = TRUE, norm = "scale")
+  str(mamRER)
+
+  if (plot_avg) {
+    message("Plotting average tree...")
+    avgtree = plotTreeHighlightBranches(
+      tree$masterTree,
+      hlspecies = c("Mus_musculus", "Mesocricetus_auratus", "Acomys_cahirinus"),
+      hlcols = c("black", "green"),
+      main = "Average tree"
+    )
+    print(avgtree)
+  }
+
+  message("Preparing phenotypic data...")
+  # Turn the two-column data frame into a named vector: names = species, values = phenotype
+  pheno = setNames(pheno$V2, pheno$V1)
+  print(head(pheno))
+
+  message("Converting categorical phenotypes to paths...")
+  charpaths = char2PathsCategorical(pheno, tree)
+  str(charpaths)
+
+  message("Correlating RERs with categorical phenotypes...")
+  # res[[1]] = global (all-category) result, res[[2]] = named list of pairwise results
+  res = correlateWithCategoricalPhenotype(mamRER, charpaths, sort = TRUE)
+  str(res)
+
+  res_global = res[[1]]
+
+  message("Top 5 results for global p-values:")
+  print(head(res_global, 5))
+
+  message("Count of significant p-values (p < 0.05) in global results:")
+  print(table(res_global$P < 0.05))
+
+  message("Count of NA values in global results:")
+  print(table(is.na(res_global$P)))
+
+  best_peak = res_global[which.min(res_global$P), ]
+  message(paste(
+    "Best peak (lowest p-value):", rownames(best_peak),
+    "with p-value:", best_peak$P, "and Rho:", best_peak$Rho
+  ))
+
+  # Placeholders for the pairwise results (only filled in if check_pairs = TRUE)
+  res_1v2 = res_1v3 = res_2v3 = NULL
+  best_peak_1v2 = best_peak_1v3 = best_peak_2v3 = NULL
+
+  if (check_pairs) {
+    # Pull out each pairwise comparison from the categorical result list
+    res_1v2 = res[[2]][["1 - 2"]]
+    res_1v3 = res[[2]][["1 - 3"]]
+    res_2v3 = res[[2]][["2 - 3"]]
+
+    best_peak_1v2 = summarize_comparison(res_1v2, "murine vs brachydont")
+    best_peak_1v3 = summarize_comparison(res_1v3, "murine vs hypsodont")
+    best_peak_2v3 = summarize_comparison(res_2v3, "brachydont vs hypsodont")
+  }
+
+  return(list(
+    best_peak = rownames(best_peak),
+    mamRER = mamRER,
+    res = res,
+    res_global = res_global,
+    tree = tree,
+    res_1v2 = res_1v2,
+    res_1v3 = res_1v3,
+    res_2v3 = res_2v3,
+    best_peak_1v2 = if (!is.null(best_peak_1v2)) rownames(best_peak_1v2) else NULL,
+    best_peak_1v3 = if (!is.null(best_peak_1v3)) rownames(best_peak_1v3) else NULL,
+    best_peak_2v3 = if (!is.null(best_peak_2v3)) rownames(best_peak_2v3) else NULL
+  ))
+}
+```
+
+## 4. plotRERs(): plot RERs for the peaks of interest
+
+```{r plotrers-function}
+# Generates RER plots (and optionally a tree view) for the global best peak
+# and for each pairwise-comparison best peak. If `stats` is not supplied,
+# getStats() is called internally to produce it.
+plotRERs = function(tree_file, pheno, foreground, stats = NULL,
+                     peak = NULL, peak_1v2 = NULL, peak_1v3 = NULL, peak_2v3 = NULL,
+                     plot_RERs = TRUE, plot_tree = TRUE, plot_peak = TRUE) {
+
+  if (is.null(stats)) stats = getStats(tree_file, pheno)
+  mamRER = stats$mamRER
+  tree   = stats$tree
+
+  # Fall back to the best peaks found by getStats() when none is specified
+  if (is.null(peak)) {
+    message("No peak specified, using the best peak from getStats...")
+    peak = stats$best_peak
+  }
+  if (is.null(peak_1v2)) {
+    message("No peak specified for 1v2, using the best peak from getStats...")
+    peak_1v2 = stats$best_peak_1v2
+  }
+  if (is.null(peak_1v3)) {
+    message("No peak specified for 1v3, using the best peak from getStats...")
+    peak_1v3 = stats$best_peak_1v3
+  }
+  if (is.null(peak_2v3)) {
+    message("No peak specified for 2v3, using the best peak from getStats...")
+    peak_2v3 = stats$best_peak_2v3
+  }
+
+  message("Converting foreground to paths...")
+  # Terminal-branch paths for each foreground species group, used to color plots
+  phenvExample = foreground2Paths(foreground, tree, clade = "terminal")
+  phenv2 = foreground2Paths(foreground2, tree, clade = "terminal")
+
+  plot_RER = plot_RER_1v2 = plot_RER_1v3 = plot_RER_2v3 = NULL
+  rers    = NULL
+  rertree = NULL
+
+  if (plot_RERs) {
+    par(mfrow = c(1, 1))
+
+    message(paste("Plotting RERs for peak:", peak))
+    plot_RER = plotRers(mamRER, peak, phenv = phenvExample)
+
+    message(paste("Plotting RERs for 1v2 peak:", peak_1v2))
+    plot_RER_1v2 = plotRers(mamRER, peak_1v2, phenv = phenvExample)
+
+    message(paste("Plotting RERs for 1v3 peak:", peak_1v3))
+    plot_RER_1v3 = plotRers(mamRER, peak_1v3, phenv = phenvExample)
+
+    message(paste("Plotting RERs for 2v3 peak:", peak_2v3))
+    plot_RER_2v3 = plotRers(mamRER, peak_2v3, phenv = phenv2)
+  }
+
+  if (plot_tree) {
+    message("Returning RERs as a tree...")
+    par(mfrow = c(1, 1))
+    rers = returnRersAsTree(tree, mamRER, peak, plot = TRUE, phenv = phenvExample)
+  }
+
+  if (plot_peak) {
+    message(paste("Plotting tree for peak:", peak))
+    par(mfrow = c(1, 1))
+    rertree = plotTreeHighlightBranches(
+      tree$trees[[peak]],
+      hlspecies = foreground,
+      main = paste("Tree of", peak)
+    )
+  }
+
+  return(list(
+    plot_RER = plot_RER,
+    plot_RER_1v2 = plot_RER_1v2,
+    plot_RER_1v3 = plot_RER_1v3,
+    plot_RER_2v3 = plot_RER_2v3,
+    rers = rers,
+    RERtree = rertree
+  ))
+}
+```
+
+## 5. Run the main analysis
+
+```{r run-main-analysis}
+# Run the full pipeline on the full tree, including the average-tree plot
+res = getStats(tree_file = "tree_full.txt", pheno = pheno, plot_avg = TRUE)
+
+# Generate RER plots for the peaks identified above
+rer_plots = plotRERs(tree_file = "tree_full.txt", pheno, foreground, stats = res)
+
+# Global best-peak RER plot, recolored and labeled
+RER_global = rer_plots$plot_RER
+RER = RER_global + ggplot2::scale_colour_manual(values = c("black", "forestgreen")) + ggtitle("PLXNA2_Distal_Intergenic")
+RER
+
+# Best peak for the 2-vs-3 comparison, recolored and labeled
+RER_global = rer_plots$plot_RER_2v3
+RER_2v3 = RER_global + ggplot2::scale_colour_manual(values = c("black", "orange")) + ggtitle("VANGL1_Promoter")
+RER_2v3
+```
+
+## 6. UpSet plot of significant CREs per pairwise comparison
+
+```{r upset-plot, fig.width=10, fig.height=6}
+# Drop rows with no p-value before selecting significant hits
+res_1v2 = res$res_1v2 %>% filter(!is.na(P))
+res_1v3 = res$res_1v3 %>% filter(!is.na(P))
+res_2v3 = res$res_2v3 %>% filter(!is.na(P))
+
+# Significant (p < 0.05) CRE names for each pairwise comparison
+sig_1v2 = rownames(res_1v2[res_1v2$P < 0.05, ])
+sig_1v3 = rownames(res_1v3[res_1v3$P < 0.05, ])
+sig_2v3 = rownames(res_2v3[res_2v3$P < 0.05, ])
+
+gene_list = list(
+  "murine vs brachydont" = sig_1v2,
+  "murine vs hypsodont" = sig_1v3,
+  "brachydont vs hypsodont" = sig_2v3
+)
+
+library(stringr)
+
+# each category present
+annot_patterns = c("Distal_Intergenic", "Promoter", "Intron", "Exon", "5_UTR", "3_UTR")
+
+get_annotation = function(x) {
+  # Look for the first matching category
+  ann = str_extract(x, paste(annot_patterns, collapse = "|"))
+  ann
+}
+
+all_genes = unique(c(sig_1v2, sig_1v3, sig_2v3))
+
+# Membership table used to build the UpSet plot: one row per CRE, one logical
+# column per pairwise comparison, plus its genomic annotation category
+df = data.frame(
+  gene = all_genes,
+  "Découplé vs Ancestral" = all_genes %in% sig_1v2,
+  "Découplé vs Couplé" = all_genes %in% sig_1v3,
+  "Ancestral vs Couplé"= all_genes %in% sig_2v3,
+  check.names = FALSE
+)
+
+df$Annotation = get_annotation(df$gene)
+
+sets = c("Découplé vs Ancestral",
+  "Découplé vs Couplé",
+  "Ancestral vs Couplé")
+
+pal = wes_palette("Zissou1", 6, type = "continuous")
+
+# Intersection sizes colored by annotation category
+upset(
+  df,
+  sets,
+  base_annotations = list(
+    'Intersection size' = intersection_size(
+      counts = TRUE,
+      mapping = aes(fill = Annotation)
+    ) + scale_fill_manual(values = pal)
+  ),
+  width_ratio = 0.15
+)
+```
+
+## 7. GO enrichment on globally significant genes
+
+```{r go-enrichment}
+# Extract the gene symbol (text before the first underscore) from each
+# significant CRE name, then title-case it to match org.Mm.eg.db's SYMBOL keys
+signif = rownames(res$res_global)[which(res$res_global$P < 0.05)]
+genes = sapply(signif, function(x) strsplit(x, "_")[[1]][1])
+genes = unique(genes)
+genes = paste0(toupper(substr(genes, 1, 1)), tolower(substr(genes, 2, nchar(genes))))
+
+# Background gene universe = every gene tested (not just significant ones)
+all_genes = rownames(res$res_global)
+universe = sapply(all_genes, function(x) strsplit(x, "_")[[1]][1])
+universe = unique(universe)
+universe = paste0(toupper(substr(universe, 1, 1)), tolower(substr(universe, 2, nchar(universe))))
+
+# GO Biological Process enrichment, restricted to the tested-gene universe
+go = enrichGO(genes, OrgDb = "org.Mm.eg.db", ont = "BP", keyType = "SYMBOL", universe = universe)
+go_plot = dotplot(go)
+go_plot
+```
