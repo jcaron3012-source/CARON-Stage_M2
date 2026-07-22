@@ -82,7 +82,7 @@ The codes are formatted to be used with SLURM in the CBPsmn cluster of the ENS d
 - [MAF tools](https://github.com/ComparativeGenomicsToolkit/cactus) (for MAF conversion)
 - [PHAST](http://compgen.cshl.edu/phast/) (for PhastCons/PhyloP)
 - [RERconverge](https://github.com/nclark-lab/RERconverge) (for relative rate analysis)
-- [HALPER](https://github.com/glennhickling/HALPER) (for orthology validation)
+- [HALPER](https://github.com/pfenninglab/halLiftover-postprocessing) (for orthology validation)
 - [BEDTools](https://bedtools.readthedocs.io/) (for BED file processing)
 - [UCSC LiftOver](https://genome.ucsc.edu/util.html) (for coordinate lifting)
 - [nextflow LiftOver](https://nf-lo.readthedocs.io/en/latest/) (for chainfile creation)
