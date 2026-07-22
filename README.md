@@ -6,7 +6,7 @@ It needs as input:
 - A list of cis-regulatory sequences in BED format for two species
 - A list of conservation scores (PhastCons and/or PhyloP) for each base of a given genome; and a list of conserved regions predicted by the phastCons-Viterbi algorithm
 
-Here, the whole genome alignment was fetched from Zoonomia (https://cglgenomics.ucsc.edu/data/cactus/). The BED files were produced by the CIGOGNE team, and were sequences of the mouse and hamster. The conservation scores come from the data of Michaël Dong, researcher at Uppsala University and member of the Zoonomia Consortium. The PhastCons/PhyloP pipeline can be found here: https://github.com/michaeldong1/ZOONOMIA/tree/main/UppmaxSlurm_version.
+Here, the whole genome alignment was fetched from [Zoonomia](https://cglgenomics.ucsc.edu/data/cactus/). The BED files were produced by the CIGOGNE team, and were sequences of the mouse and hamster. The conservation scores come from the data of Michaël Dong, researcher at Uppsala University and member of the Zoonomia Consortium. The PhastCons/PhyloP pipeline can be found [here](https://github.com/michaeldong1/ZOONOMIA/tree/main/UppmaxSlurm_version).
 
 ------------
 # Pipeline
@@ -90,8 +90,6 @@ The codes are formatted to be used with SLURM in the CBPsmn cluster of the ENS d
 ### Python/R Packages
 - Python: `pandas`, `numpy`, `biopython`
 - R : `dplyr`, `ggplot2`, `tidyr`, `textshape`, `patchwork`, `emmeans`, `UpSetR`, `ggbeeswarm`, `GenomeInfoDb`, `cowplot`, `gtools`, `wesanderson`, `ggtree`, `ggmsa`, `treeio`, `aplot`, `Biostrings`, `RERconverge`, `data.table`, `ComplexUpset`, `enrichplot`, `clusterProfiler`, `ggrepel`, `VennDiagram`, `scales`
-
-**Note:** All scripts are designed for execution on a **SLURM-managed HPC cluster** (e.g., CBPsmn at ENS de Lyon).
 
 ## Installation
 
