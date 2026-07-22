@@ -85,6 +85,7 @@ The codes are formatted to be used with SLURM in the CBPsmn cluster of the ENS d
 - [HALPER](https://github.com/glennhickling/HALPER) (for orthology validation)
 - [BEDTools](https://bedtools.readthedocs.io/) (for BED file processing)
 - [UCSC LiftOver](https://genome.ucsc.edu/util.html) (for coordinate lifting)
+- [nextflow LiftOver](https://nf-lo.readthedocs.io/en/latest/) (for chainfile creation)
 
 ### Python/R Packages
 - Python: `pandas`, `numpy`, `biopython`
@@ -192,6 +193,9 @@ The rest of the analysis was done with ```src/Rscripts/rerconverge.Rmd``` on a l
 ```bash
 #Get the best summit from MACS2-predicted summits of each cluster
 python3 src/python_scripts/best_summit_per_cre.py --cres --summit --out --strategy
+
+#Create the chainfile
+nextflow run ../nf-LO --source {reference_genome} --target {query_genome} --distance near --aligner minimap2 -profile conda
 
 #Run the main HALPER pipeline
 bash src/slurmjobs/HALPER_pipeline/HALPER_pipeline.sh
